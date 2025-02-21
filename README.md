@@ -279,12 +279,22 @@ There is 2 possible solution
 
 ```  
 
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/147
+
+
+
+
 # Issue H-2: Anyone Can Get Funds From This Contract. 
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/341 
 
 ## Found by 
-KupiaSec, future, novaman33
+0xadrii, KupiaSec, farman1094, future, novaman33
 
 
 ### Summary
@@ -471,6 +481,16 @@ Result:
 
 
 
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/155
+
+
+
+
 # Issue H-3: Calling the transferReserveToAuction will revert due to increase in currentPeriod 
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/407 
@@ -547,123 +567,152 @@ This can be mitigated by subtracting 1 from the quoted `currentPeriod` in the [t
 
 just like it happened in the [distribute](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/14a962c52a8f4731bbe4655a2f6d0d85e144c7c2/plaza-evm/src/Pool.sol#L589) function.
 
-# Issue H-4: Incorrect price handling in `BondOracleAdapter` contract 
+## Discussion
 
-Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/466 
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/157
+
+
+
+
+# Issue H-4: BondOracleAdapter will cause massive loss of funds for a large number of bond tokens 
+
+Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/440 
 
 ## Found by 
-ZoA, bladeee, copperscrewer, tvdung94
+0x52, ZoA, bladeee
 
 ### Summary
 
-In `BondOracleAdapter` contract, it returns price of `BondToken` using TWAP oracle of Aerodrome's concentrated liquidity pools, which uses Uniswap V3's price calculation mechanism. However, it does not handle the price calculation correctly, thus it only works when `BondToken` is `token0` and `Liquidity Token` is `token1` of the CL pool, both with 18 decimals.
+BondOracleAdapter both directly returns the price from the pool and hardcodes the oracle decimals to bondToken.decimals(). The combination of these two factors will cause the adapter to return an incorrect value for any bondToken that is not alphanumerically greater than USDC. The dex pool always prices tokenA in terms of tokenB and because the decimals of the oracle are hardcoded to the decimals of the bond token, the bond token must be tokenB or else the decimals will be incorrect. This incorrect pricing will cause massive loss of funds to user withdrawing from the pool as the market price will be much too low.
 
-It does not work when `BondToken` is `token1` of the CL pool, because the price returned is the price of `Liquidity Token` against `BondToken`, which means $ \frac{1}{Price} $.
+When initializing the BondOracleAdapter, it pulls the pool address from the getPool mapping. While this will pull the relevant pool for those tokens, it does not ensure that the tokens are in the correct order.
 
-In addition, it does not handle different token decimals either, which returns unexpected token price.
+[CLFactory.sol#L91-L93](https://github.com/velodrome-finance/slipstream/blob/7b50de4648ec340891a8d5c1366c83983308d3b9/contracts/core/CLFactory.sol#L91-L93)
+
+        getPool[token0][token1][tickSpacing] = pool;
+        // populate mapping in the reverse direction, deliberate choice to avoid the cost of comparing addresses
+        getPool[token1][token0][tickSpacing] = pool;
+
+We see that get pool is populated in both orders even though they are sorted alphanumerically. Therefore when the pool is retrieved for BondOracleAdapter the tokens can be in any order.
+
+[BondOracleAdapter#L113](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/BondOracleAdapter.sol#L113)
+
+    return (uint80(0), int256(getPriceX96FromSqrtPriceX96(getSqrtTwapX96)), block.timestamp, block.timestamp, uint80(0));
+
+We see that when price is returned it is always returned directly as returned by the underlying dex pool. The issues is that if the bond token is not tokenB then the decimal of the return value will be the liquidity token rather than the bond token.
+
+[Pool.sol#L519-L521](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Pool.sol#L519-L521)
+
+    if (marketRate != 0 && marketRate < redeemRate) {
+      redeemRate = marketRate;
+    }
+
+As a result when redeeming bond tokens the value will be significantly lower than expected and will result in bond holders losing large amounts of value.
 
 ### Root Cause
 
-The root cause lies in `lastRoundData` function on [BondOracleAdapter.sol#L99-L114](https://github.com/sherlock-audit/,2024-12-plaza-finance/blob/14a962c52a8f4731bbe4655a2f6d0d85e144c7c2/plaza-evm/src/BondOracleAdapter.sol#L99-L114), where it only calculates price by squaring `sqrtPriceX96` without accounting the order of tokens in the CL pool.
+[BondOracleAdapter#L113](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/BondOracleAdapter.sol#L113) always return price directly
+
+[BondOracleAdapter.sol#L62](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/BondOracleAdapter.sol#L62) always assumes that price is denominated in bond tokens
 
 ### Internal Pre-conditions
 
-- The `OracleFeeds` contract uses `BondOracleAdapter` to calculate the price of Bond Token.
+address(bondToken) > address(liquidityToken)
 
 ### External Pre-conditions
 
-- In `Aerodrome` CL pool, the bond token is `token1`, the liquidity token is `token0`.
+N/A
 
 ### Attack Path
 
-- Since the price returned from `BondOracleAdapter` is $ \frac {1} {Price} $, the price of `wstETH` for example, will be `1 / 3900` USD.
-- Users create/redeem very little amount of bond tokens than they deserve, or the whole mechanism does not work because of minimum bond token amount mechanism.
+N/A
 
 ### Impact
 
-- Incorrect price from the oracle breaks the whole pricing mechanism of the bonding protocol.
-- Users do not create or redeem correct amounts of Bond Tokens.
+Loss of funds for redeeming bond token holders
 
 ### PoC
 
-To demonstrate the issue, I've written a test case using Foundry below:
-
-- It forks from Base network, to easily work with live Aerodrome protocol.
-- `wstETH / USDC` CL pool is used for the test, where `wstETH` is `token1` of the pool.
-
-```solidity
-// SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.26;
-
-import "forge-std/Test.sol";
-
-import {Utils} from "../src/lib/Utils.sol";
-import {BondOracleAdapter} from "../src/BondOracleAdapter.sol";
-
-contract AuditBondOracleAdapter is Test {
-
-    address private bondToken = 0xc1CBa3fCea344f92D9239c08C0568f6F2F0ee452; // wstETH
-    address private liquidityToken = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913; // USDC
-    address private factory = 0x5e7BB104d84c7CB9B682AaC2F3d509f5F406809A; // CL Factory
-
-    function setUp() public {}
-
-    function testBondTokenPrice() public {
-        BondOracleAdapter adapter = BondOracleAdapter(Utils.deploy(
-            address(new BondOracleAdapter()),
-            abi.encodeCall(BondOracleAdapter.initialize, (
-                bondToken,
-                liquidityToken,
-                3600, // 1 hour
-                factory,
-                address(1)
-            ))
-        ));
-
-        (,int256 answer,,,) = adapter.latestRoundData();
-
-        console.log("--- Bond Token Price --- ");
-        console.log(answer);
-        console.log("--- Bond Token Decimals ---");
-        console.log(adapter.decimals());
-    }
-}
-```
-
-Run the test case using the command below, replacing `{{RPC_URL}}` with working Base RPC:
-
-```bash
-forge test --match-test testBondTokenPrice -vv --fork-url {{RPC_URL}}
-```
-
-Here's the output of the test:
-
-```bash
-Ran 1 test for test/AuditBondOracleAdapter.t.sol:AuditBondOracleAdapter
-[PASS] testBondTokenPrice() (gas: 3508416)
-Logs:
-  --- Bond Token Price --- 
-  18876194167075133461674996703661467841
-  --- Bond Token Decimals ---
-  18
-
-Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 8.73s (5.86s CPU time)
-
-Ran 1 test suite in 10.46s (8.73s CPU time): 1 tests passed, 0 failed, 0 skipped (1 total tests)
-```
-
-As shown in the test output, the price of `wstETH` returned is `18876194167075133461.674996703661467841 USDC` which is pretty huge amount, this happens because of both token order and token decimals.
+_No response_
 
 ### Mitigation
 
-The price calculation mechanism should be modified to handle token ordering and decimals correctly.
+BondOracleAdapter#initialize should set decimals to either bondToken or liquidityToken depending on token order in the pool
 
-# Issue H-5: Malicious user can leverage flash loans to claim all coupon rewards 
+# Issue H-5: Leverage user can avoid paying fees to bond holders by withdrawing before auction ends 
+
+Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/450 
+
+The protocol has acknowledged this issue.
+
+## Found by 
+0x52, moray5554, phoenixv110
+
+### Summary
+
+Bond holders are paid fees by leverage holders in discrete quarterly payments. Due to the long length of this period, leverage holders can easily exploit and avoid this fee by withdrawing before funds are taken to pay for the auction. By doing this they can easily avoid paying all fees to bond holders, causing substantial losses to other leverage holders who are now forced to pay the malicious user's share of the fees.
+
+[Pool.sol#L511-L517](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Pool.sol#L511-L517)
+
+        if (collateralLevel <= COLLATERAL_THRESHOLD) {
+            redeemRate = ((tvl * multiplier) / assetSupply);
+        } else if (tokenType == TokenType.LEVERAGE) {
+    @>      redeemRate = ((tvl - (bondSupply * BOND_TARGET_PRICE)) / assetSupply) * PRECISION;
+        } else {
+            redeemRate = BOND_TARGET_PRICE * PRECISION;
+        }
+
+We see above that the redeemRate for leverage tokens is calculated based on the number of asset held by the pool.
+
+[Pool.sol#L577-L583](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Pool.sol#L577-L583)
+
+        function transferReserveToAuction(uint256 amount) external virtual {
+            (uint256 currentPeriod, ) = bondToken.globalPool();
+            address auctionAddress = auctions[currentPeriod];
+            require(msg.sender == auctionAddress, CallerIsNotAuction());
+            
+    @>      IERC20(reserveToken).safeTransfer(msg.sender, amount);
+        }
+
+We also see that funds are transferred out of the contract until after the auction is completed. Therefore if the user withdraws before the auction ends then they will received an amount that is not subject to the bond holders fee.
+
+### Root Cause
+
+[Pool.sol#L383-L414](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Pool.sol#L383-L414) fails to enforce or charge partial fees to redeeming leverage users
+
+### Internal preconditions
+
+None
+
+### External preconditions
+
+None
+
+### Attack Path
+
+N/A
+
+### Impact
+
+Leverage users can get leverage exposure for free while forcing other users to pay their fees
+
+### POC
+
+Unfortunately it is impossible to demonstrate via POC because `transferReserveToAuction` is broken
+
+### Mitigation
+
+N/A
+
+# Issue H-6: Malicious user can leverage flash loans to claim all coupon rewards 
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/725 
 
 ## Found by 
-0x23r0, 0x52, AksWarden, ChainProof, InquisitorScythe, Nadir\_Khan\_Sec, OrangeSantra, Pablo, Schnilch, Strapontin, bladeee, farman1094, komane007
+0x23r0, 0x52, 0xNov1ce, 0xe4669da, AksWarden, BADROBINX, ChainProof, Etherking, InquisitorScythe, Kenn.eth, MysteryAuditor, Nadir\_Khan\_Sec, OrangeSantra, Pablo, Schnilch, Strapontin, Uddercover, ZoA, aswinraj94, bladeee, copperscrewer, devalinas, farman1094, future, komane007, momentum, moray5554, phoenixv110
 
 ### Summary
 
@@ -749,12 +798,78 @@ _No response_
 
 Consider not allowing anyone to turn over a period, or apply some kind of snapshot protection
 
-# Issue H-6: Fee is charged current reserveToken pool balance to time which is not updated 
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/162
+
+
+
+
+# Issue H-7: Funds might remain locked in `BalancerRouter` when depositing in Balancer pool 
+
+Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/841 
+
+## Found by 
+0xShahilHussain, 0xadrii, Adotsam, Albort, KupiaSec, ZeroTrust, bretzel, dobrevaleri, elolpuer, novaman33, shushu, sl1
+
+### Summary
+
+Not checking how much of the deposited assets are actually deposited in the pool, will lead to loss of funds for the user, because the remaining assets will be locked inside the `BalancerRouter`.
+
+### Root Cause
+
+`BalancerRouter` provides an integration with Balancer V2 pools via the [joinBalancerPool()](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/BalancerRouter.sol#L65), which is used by  [joinBalancerAndPlaza()](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/BalancerRouter.sol#L42) and [joinBalancerAndPredeposit()](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/BalancerRouter.sol#L23). When called, [joinBalancerPool()]() accepts the `poolId`, array of assets, the maximum amounts the user is willing to deposit and additional user data. First it transfers the maximum amount of assets from the user's address to its ([ref](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/BalancerRouter.sol#L72-L75)). And after that joins the pool ([ref](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/BalancerRouter.sol#L86)). 
+
+However, it is not guaranteed that the maximum value of each asset will be deposited in the Pool. From the [Balancer V2 doc](https://github.com/balancer/balancer-v2-monorepo/blob/36d282374b457dddea828be7884ee0d185db06ba/pkg/interfaces/contracts/vault/IVault.sol#L350-L352):
+> The amounts to send are decided by the Pool and not the Vault: it just enforces these maximums.
+
+This means that there might be leftover assets in the `BalancerRouter` that are not deposited into the pool, but are also not returned to the user.
+
+### Internal Pre-conditions
+
+_No response_
+
+### External Pre-conditions
+
+1. Not all assets are deposited into the Balancer Pool.
+
+### Attack Path
+
+1. User calls `joinBalancerAndPredeposit()` or `joinBalancerAndPlaza()`.
+2. Maximum amount of tokens are sent to the `BalancerRouter`.
+3. Not all of the tokens are deposited into the Pool, because he decides how much to deposit.
+
+### Impact
+
+The user will suffer loss of funds, because part of his assets will remain locked in the `BalancerRouter`.
+
+### PoC
+
+_No response_
+
+### Mitigation
+
+Send the remaining assets back to the user.
+
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/154
+
+
+
+
+# Issue H-8: Fee is charged current reserveToken pool balance to time which is not updated 
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/842 
 
 ## Found by 
-0x52, 0xDemon, 0xadrii, 0xlucky, 0xmystery, Abhan1041, BADROBINX, Beejay, Boy2000, BugAttacker, ChainProof, Darinrikusham, DeLaSoul, Etherking, Goran, Harry\_cryptodev, JohnTPark24, Kirkeelee, KupiaSec, Kyosi, MysteryAuditor, Pablo, Saurabh\_Singh, Strapontin, ZeroTrust, ZoA, appet, bigbear1229, bladeee, bretzel, bube, copperscrewer, davidjohn241018, dobrevaleri, farismaulana, future, i3arba, moray5554, mxteem, novaman33, pessimist, phoenixv110, prosper, shiazinho, sl1, t0x1c, tutiSec, tvdung94, y4y, ydlee
+0x52, 0xDemon, 0xadrii, 0xlucky, 0xmystery, Abhan1041, Beejay, BugAttacker, ChainProof, Darinrikusham, DeLaSoul, Etherking, Goran, Harry\_cryptodev, JohnTPark24, Kirkeelee, KupiaSec, Kyosi, MysteryAuditor, Pablo, Saurabh\_Singh, Strapontin, ZeroTrust, ZoA, appet, bigbear1229, bladeee, bretzel, bube, davidjohn241018, dobrevaleri, farismaulana, future, moray5554, novaman33, pessimist, prosper, sl1, t0x1c, tvdung94, ydlee
 
 ### Summary
 
@@ -813,119 +928,112 @@ _No response_
 
 `claimFees` can be invoked inside of  [_create](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/14a962c52a8f4731bbe4655a2f6d0d85e144c7c2/plaza-evm/src/Pool.sol#L222C12-L222C19) and [_redeem](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/14a962c52a8f4731bbe4655a2f6d0d85e144c7c2/plaza-evm/src/Pool.sol#L383C12-L383C19) functions. 
 
-# Issue H-7: BondToken and LevToken Holders redeem for more tokens than they deposited when collateral factor is <= 1.2 
+## Discussion
 
-Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/870 
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/164
+
+
+
+
+# Issue H-9: `COLLATERAL_THRESHOLD` should be set to `125%` instead of `120%`. 
+
+Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/895 
 
 ## Found by 
-056Security, Dliteofficial, KupiaSec, bigbear1229, future, novaman33, zraxx
+KupiaSec, makeWeb3safe, werulez99, zraxx
 
 ### Summary
 
-_No response_
+The price of `BondToken` depends on whether the `collateralLevel` is above or below `120%`.
+
+- If `collateralLevel <= 120%`:
+
+  `80%` of TVL is allocated for `BondToken`, so the price of `BondToken` is less than `120 * 80% = 96`.
+- If `collateralLevel > 120%`:
+
+  The price of `BondToken` is set to 100.
+
+As you can see, when the `collateralLevel` moves from below to above `120%`, the price of `BondToken` changes from `<= 96` to `100`, indicating that the price curve is not continuous.
+
+To ensure continuity, `125%` should be used instead of `120%`.
 
 ### Root Cause
 
-To redeem their tokens, BondToken and LevToken holders have to call [`Pool::Redeem()`](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Pool.sol#L353). The redeem rate applied during redemption depends on the collateral level of the protocol at the time. If the collateral level is above 1.2, we use `BOND_TARGET_PRICE * 100`, and if it is below, 80% or 20% of the vault’s collateral value per BondToken/LevToken or the market price, whichever is lower, is used. Because a fraction of the redeemRate is being used, a higher reserve token amount is calculated as the entitlement of the bondToken Holder. Using the example in the POC attached, a user who deposited 1000 WETH will be entitled to over 1100 WETH upon redemption, assuming a collateral value <=1.2. The collateral level could fall due to the reduction in the price of the total value locked in the pool.
+The [getRedeemAmount()](https://github.com/sherlock-audit/2024-12-plaza-finance/tree/main/plaza-evm/src/Pool.sol#L511-L518) function calculates the `redeemRate` based on whether the `collateralLevel` is above or below `120%`.
+
+- If `collateralLevel <= 120%`:
+  ```solidity
+    redeemRate = (tvl * multiplier) / assetSupply
+  ```
+  Here, `multiplier` is `80%`, and `assetSupply` is the total supply of `BondToken`. Since the `collateralLevel` is less than `120%`, the `redeemRate` will be less than `120 * 80% = 96`.
+- If `collateralLevel > 120%`:
+  ```solidity
+    redeemRate = 100
+  ```
+As observed, when the `collateralLevel` moves from below to above `120%`, the `redeemRate` is not continuous, moves from `96` to `100` suddenly.
+
+This means that when the `collateralLevel` is around `120%`, a minor increase in TVL can lead to a significant price increase of `BondToken`, resulting in substantial losses for `LeverageToken` holders, even as the TVL increases.
 
 ```solidity
-function getRedeemAmount() {
-...............
-    // Calculate the redeem rate based on the collateral level and token type
-    uint256 redeemRate;
-    if (collateralLevel <= COLLATERAL_THRESHOLD) {
-      redeemRate = ((tvl * multiplier) / assetSupply);
-    } else if (tokenType == TokenType.LEVERAGE) {
-      redeemRate = ((tvl - (bondSupply * BOND_TARGET_PRICE)) / assetSupply) * PRECISION;
-    } else {
-      redeemRate = BOND_TARGET_PRICE * PRECISION;
-    }
-
-    if (marketRate != 0 && marketRate < redeemRate) {
-      redeemRate = marketRate;
-    }
-    
-    // Calculate and return the final redeem amount
-    return ((depositAmount * redeemRate).fromBaseUnit(oracleDecimals) / ethPrice) / PRECISION;
-}
+      function getRedeemAmount(
+        ...
+        
+        uint256 redeemRate;
+511     if (collateralLevel <= COLLATERAL_THRESHOLD) {
+          redeemRate = ((tvl * multiplier) / assetSupply);
+        } else if (tokenType == TokenType.LEVERAGE) {
+          redeemRate = ((tvl - (bondSupply * BOND_TARGET_PRICE)) / assetSupply) * PRECISION;
+515     } else {
+          redeemRate = BOND_TARGET_PRICE * PRECISION;
+        }
+        
+        // Calculate and return the final redeem amount
+        return ((depositAmount * redeemRate).fromBaseUnit(oracleDecimals) / ethPrice) / PRECISION;
+      }
 ```
 
-### Internal Pre-conditions
+### Internal pre-conditions
 
-_No response_
-
-### External Pre-conditions
-
-1. The price of the reserve token has to reduce enough to cause the collateral level to be <= 1.2.
-2. The user has to create the bondToken when the collateral level is higher than 1.2
+### External pre-conditions
 
 ### Attack Path
 
-_No response_
+Let's consider the following scenario:
+
+1. Current State of the Pool:
+    - `TVL`: 1190
+    - `bondSupply`: 10
+    - `collaterlLevel`: 119%
+    - TVL for `BondToken`: 1190 * 0.8 = 952
+    - TVL for `LeverageToken`: 1190 * 0.2 = 238
+2. Price of Underlying Rises:
+    - `TVL`: 1210 (due to price increase)
+    - `bondSupply`: 10
+    - `collaterlLevel`: 121%
+    - TVL for `BondToken`: 100 * 10 = 1000
+    - TVL for `LeverageToken`: 1210 - 100 = 210
+
+As you can see, `LeverageToken` holders incur a loss of `238 - 210 = 28`, even though the underlying price has increased.
 
 ### Impact
 
-The user will be entitled to more tokens than they deposit which will result in a deficit to the protocol.
+Even though the price of the underlying increases, `LeverageToken` holders incur a loss.
 
 ### PoC
 
- ```solidity
- function test_vulnerability() public {
-    vm.startPrank(governance);
-    Token rToken = Token(params.reserveToken);
-
-    rToken.mint(governance, 1000000000);
-    rToken.approve(address(poolFactory), 1000000000);
-
-    Pool _pool = Pool(poolFactory.createPool(params, 1000000000, 25000000000, 1000000000, "", "", "", "", false));
-    uint256 c_amount = _pool.getCreateAmount(
-        Pool.TokenType.BOND, 
-        1000,
-        25000000000,
-        1000000000,
-        1000000000,
-        3500 * CHAINLINK_DECIMAL_PRECISION,
-        CHAINLINK_DECIMAL
-      );
-
-    emit log_uint(calculateCollateral(1000000000, 25000000000, 3500)); //emits the collateral level at price $3500
-
-    emit log_uint(calculateCollateral(1000000000, 25000000000, 3000)); //emits the collateral level at a reduced price of $3000
-    
-    console.log("Amount of Bond Tokens received is ", c_amount);
-
-    uint r_amount = _pool.getRedeemAmount(
-        Pool.TokenType.BOND, 
-        c_amount,
-        25000000000 + c_amount, 
-        1000000000, 
-        1000000000 + 1000, 
-        3000 * CHAINLINK_DECIMAL_PRECISION,
-        CHAINLINK_DECIMAL,
-        0
-      );
-    
-    console.log("Amount of Bond Tokens received is ", r_amount);
-  }
-
-  function calculateCollateral(uint poolReserve, uint supply, uint ethPrice) internal returns (uint) {
-    uint PRECISION = 1000000;
-    return (poolReserve * ethPrice * PRECISION) / (supply * 100);
-  }
-```
-
-Add this to Pool.t.sol
-
 ### Mitigation
 
-_No response_
+For `COLLATERAL_THRESHOLD`, use `125%` instead of `120%`.
 
-# Issue H-8: Users can sell `BondToken` at a higher price by manipulating the `collateralLevel` from `< 120%` to `> 120%` by purchasing `LeverageToken`. 
+# Issue H-10: Users can sell `BondToken` at a higher price by manipulating the `collateralLevel` from `< 120%` to `> 120%` by purchasing `LeverageToken`. 
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/896 
 
 ## Found by 
-KupiaSec, t0x1c, werulez99
+056Security, 0xc0ffEE, KupiaSec, bigbear1229, future, novaman33, t0x1c, zraxx
 
 ### Summary
 
@@ -1019,12 +1127,22 @@ As you can see, Bob was initially able to redeem only `$4400`. However, by manip
 
 The current price mechanism should be improved.
 
-# Issue H-9: Incorrect price representation 
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/155
+
+
+
+
+# Issue H-11: Incorrect price representation 
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/1016 
 
 ## Found by 
-0x23r0, 0x52, 0xc0ffEE, 10ap17, Ryonen, wickie
+0x23r0, 0xc0ffEE, 10ap17, Ryonen, wickie
 
 ### Summary
 
@@ -1138,6 +1256,16 @@ function _getUniswapTwapWei(IUniswapV3Pool pool, uint256 twapInterval) public vi
     return (FixedPoint96.Q96 * (10 ** 18)) / p;
 }
 ```
+
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/158
+
+
+
 
 # Issue M-1: Failed auction period still update `sharesPerToken` like it is succeed 
 
@@ -1285,12 +1413,24 @@ _No response_
 
 when auction fails, consider to update the sharesPerToken for the failed period auction to 0.
 
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/157
+
+
+
+
 # Issue M-2: Bid with high price effectively can end up with lower price 
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/198 
 
+The protocol has acknowledged this issue.
+
 ## Found by 
-ZoA, dreamcoder, wellbyt3
+ZoA
 
 ### Summary
 
@@ -1356,8 +1496,10 @@ function bid(uint256 buyReserveAmount, uint256 sellCouponAmount) external auctio
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/278 
 
+The protocol has acknowledged this issue.
+
 ## Found by 
-056Security, 0x23r0, 0xDemon, 0xShahilHussain, 0xadrii, 0xc0ffEE, Adotsam, Albort, JohnTPark24, Kenn.eth, Kirkeelee, KupiaSec, MysteryAuditor, Pablo, X0sauce, Xcrypt, ZeroTrust, ZoA, bladeee, bretzel, dobrevaleri, elolpuer, farismaulana, future, hrmneffdii, makeWeb3safe, novaman33, phoenixv110, shushu, sl1, super\_jack, tutiSec, y4y
+056Security, 0x23r0, 0xDemon, 0xShahilHussain, 0xc0ffEE, Adotsam, JohnTPark24, Kenn.eth, Kirkeelee, MysteryAuditor, Pablo, X0sauce, Xcrypt, ZeroTrust, ZoA, bladeee, dobrevaleri, farismaulana, future, hrmneffdii, makeWeb3safe, phoenixv110, super\_jack, tutiSec, y4y
 
 ### Summary
 
@@ -1441,6 +1583,8 @@ _No response_
 # Issue M-4: levETH Cannot Be Bought. 
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/333 
+
+The protocol has acknowledged this issue.
 
 ## Found by 
 KupiaSec, PeterSR, almurhasan, dobrevaleri, future, sl1
@@ -1588,7 +1732,7 @@ Result:
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/353 
 
 ## Found by 
-0xl33
+0xadrii, 0xl33, ZoA
 
 ### Summary
 
@@ -1911,44 +2055,259 @@ function setBondAndLeverageAmount(
 +   ) external onlyOwner checkDepositEnded {
 ```
 
-# Issue M-6: Leverage user can avoid paying fees to bond holders by withdrawing before auction ends 
+## Discussion
 
-Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/450 
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/160
+
+
+
+
+# Issue M-6: Auction date will drift irreversibly forward over time leading to loss of yield for bond holders 
+
+Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/446 
 
 ## Found by 
 0x52
 
 ### Summary
 
-Bond holders are paid fees by leverage holders in discrete quarterly payments. Due to the long length of this period, leverage holders can easily exploit and avoid this fee by withdrawing before funds are taken to pay for the auction. By doing this they can easily avoid paying all fees to bond holders, causing substantial losses to other leverage holders who are now forced to pay the malicious user's share of the fees.
+During the creation of the auction, lastDistribution is set to block.timestamp. Delays are compounding and will lead to loss of yield over time as the subsequent distribution will be delayed.
 
-[Pool.sol#L511-L517](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Pool.sol#L511-L517)
+[Pool.sol#L530-L571](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Pool.sol#L530-L571)
 
-        if (collateralLevel <= COLLATERAL_THRESHOLD) {
-            redeemRate = ((tvl * multiplier) / assetSupply);
-        } else if (tokenType == TokenType.LEVERAGE) {
-    @>      redeemRate = ((tvl - (bondSupply * BOND_TARGET_PRICE)) / assetSupply) * PRECISION;
-        } else {
-            redeemRate = BOND_TARGET_PRICE * PRECISION;
+        function startAuction() external whenNotPaused() {
+            // Check if distribution period has passed
+    @>      require(lastDistribution + distributionPeriod < block.timestamp, DistributionPeriodNotPassed());
+
+            // Check if auction period hasn't passed
+            require(lastDistribution + distributionPeriod + auctionPeriod >= block.timestamp, AuctionPeriodPassed());
+
+            ... SNIP
+
+            // Update last distribution time
+    @>      lastDistribution = block.timestamp;
         }
 
-We see above that the redeemRate for leverage tokens is calculated based on the number of asset held by the pool.
+Above we see that lastDistribution is used to determine if the auction can be started. Additionally, lastDistribution is set to block.timestamp which means that any delay between lastDistribution + distributionPeriod and block.timestamp will cause loss of yield in the subsequent quarter.
 
-[Pool.sol#L577-L583](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Pool.sol#L577-L583)
-
-        function transferReserveToAuction(uint256 amount) external virtual {
-            (uint256 currentPeriod, ) = bondToken.globalPool();
-            address auctionAddress = auctions[currentPeriod];
-            require(msg.sender == auctionAddress, CallerIsNotAuction());
-            
-    @>      IERC20(reserveToken).safeTransfer(msg.sender, amount);
-        }
-
-We also see that funds are transferred out of the contract until after the auction is completed. Therefore if the user withdraws before the auction ends then they will received an amount that is not subject to the bond holders fee.
+According to sherlock rules a loss of 0.01% qualifies as medium impact. The distribution period is 1 quarter or 90 days which is 7 776 000 seconds. This means that a delay of 777.6 seconds (13 minutes) will break this threshold. Given that the start of the auction is expected to be within lastDistribution + distributionPeriod + auctionPeriod it is reasonable to assume that in real world conditions that a delay of this magnitude can and will happen.
 
 ### Root Cause
 
-[Pool.sol#L383-L414](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Pool.sol#L383-L414) fails to enforce or charge partial fees to redeeming leverage users
+[Pool.sol#L570](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Pool.sol#L570) sets lastDistribution == block.timestamp
+
+### Internal preconditions
+
+None
+
+### External preconditions
+
+startAuction is delayed by at least 777.6 seconds
+
+### Attack Path
+
+N/A
+
+### Impact
+
+Loss of yield for bond holders
+
+### POC
+
+N/A
+
+### Mitigation
+
+Instead of setting lastDistribution to `block.timestamp` is should be set to `lastDistribution + distributionPeriod`
+
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/163
+
+
+
+
+# Issue M-7: Rounding loss in Auction#slotSize allows malicious user to force auction to be undersold 
+
+Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/449 
+
+## Found by 
+0x52, 0xloophole, ZoA, bladeee, moray5554
+
+### Summary
+
+When an auction reaches the max number of bids it begins rolling the lowest bids off the list. To prevent high price low value bids from spamming out legitimate bids it enforces that the bid is a even division of slotSize(). This protection is not complete due to precision loss in it calculation. If a malicious user spams max number of bids of size == slotSize(), they can force and underfunded auction to occur, DOS'ing users and preventing funding.
+
+### Root Cause
+
+[Auction.sol#L382-L384](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Auction.sol#L382-L384) does not account for precision loss allowing it to be exploited
+
+### Internal preconditions
+
+None
+
+### External preconditions
+
+None
+
+### Attack Path
+
+1. Spam max bids at size == slotSize
+2. Wait for auction to end
+3. End auction in failure
+4. Refund all bids
+
+### Impact
+
+Bond payments can be indefinitely DOS'd due to forcing auctions to fail
+
+### POC
+
+Tests for all vulnerabilities can be found [here](https://gist.github.com/IAm0x52/05589415ce45af83aa4f7a5f63afbf45).
+
+Insert the following test into Pool.t.sol
+
+    function testDOSAuction() public {
+        //test setup
+        Token rToken = Token(params.reserveToken);
+        Token cToken = Token(params.couponToken);
+
+        vm.prank(user);
+        address auction = Utils.deploy(
+        address(new Auction()),
+        abi.encodeWithSelector(
+            Auction.initialize.selector,
+            address(cToken),
+            address(rToken),
+            5000e6 + 1,
+            block.timestamp + 1 days,
+            10, // max bids set to 10 for simplicity of the test
+            address(this),
+            90
+        ));
+
+        cToken.mint(user, 1e18);
+        cToken.mint(user2, 1e18);
+
+        vm.prank(user);
+        cToken.approve(auction, type(uint256).max);
+
+        vm.prank(user2);
+        cToken.approve(auction, type(uint256).max);
+
+        vm.prank(user);
+        Auction(auction).bid(1e6, 5000e6);
+        
+        for(uint i=0; i<10; i++){
+        vm.prank(user2);
+        Auction(auction).bid(0.05e6, 500e6);
+        }
+
+        vm.warp(Auction(auction).endTime());
+
+        Auction(auction).endAuction();
+
+        // auction has received a total of 10000e6 worth of bids but still fails due to rounding error
+        assert(Auction(auction).state() == Auction.State.FAILED_UNDERSOLD);
+    }
+
+    Output:
+    [PASS] testDOSAuction()
+
+In the above test the auction receives a total of 10000e6 worth of bids but still fails as UNDERSOLD due to the issue described above.
+
+### Mitigation
+
+slotSize() should be `totalBuyCouponAmount / maxBids + 1` rather than `totalBuyCouponAmount / maxBids`
+
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/166
+
+
+
+
+# Issue M-8: BalancerRouter is implemented incorrectly and will cause loss of funds when depositing to predeposits 
+
+Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/455 
+
+The protocol has acknowledged this issue.
+
+## Found by 
+0x52, wellbyt3
+
+### Summary
+
+The balancerRouter is intended to work with multiple balancers pools but it is implemented incorrect and can only works correctly with a single pool. This is because the balancerPoolToken is hard coded to a single pool token. This makes the balanceOf check highly dangerous when depositing to preDeposit contracts. Only the hardcoded token balance is checked, causing all of the desired BPT to become stuck. This will result in user funds becoming permanently lost.
+
+[BalancerRouter.sol#L15-L21](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/BalancerRouter.sol#L15-L21)
+
+        IVault public immutable balancerVault;
+    @>  IERC20 public immutable balancerPoolToken;
+
+        constructor(address _balancerVault, address _balancerPoolToken) {
+            balancerVault = IVault(_balancerVault);
+    @>      balancerPoolToken = IERC20(_balancerPoolToken);
+        }
+
+We see above that `balancerPoolToken` is an immutable variable set during construction.
+
+[BalancerRouter.sol#L65-L90](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/BalancerRouter.sol#L65-L90)
+
+        function joinBalancerPool(
+            bytes32 poolId,
+            IAsset[] memory assets,
+            uint256[] memory maxAmountsIn,
+            bytes memory userData
+        ) internal returns (uint256) {
+
+            ... SNIP
+
+            // Join Balancer pool
+    @>      uint256 balancerPoolTokenBalanceBefore = balancerPoolToken.balanceOf(address(this));
+            balancerVault.joinPool(poolId, address(this), address(this), request);
+    @>      uint256 balancerPoolTokenBalanceAfter = balancerPoolToken.balanceOf(address(this));
+
+            return balancerPoolTokenBalanceAfter - balancerPoolTokenBalanceBefore;
+        }
+
+We see that when depositing it will always check the hardcoded address rather than the proper token. This means that it will return 0 when trying to deposit to other pools.
+
+[BalancerRouter.sol#L23-L40](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/BalancerRouter.sol#L23-L40)
+
+        function joinBalancerAndPredeposit(
+            bytes32 balancerPoolId,
+            address _predeposit,
+            IAsset[] memory assets,
+            uint256[] memory maxAmountsIn,
+            bytes memory userData
+        ) external nonReentrant returns (uint256) {
+            // Step 1: Join Balancer Pool
+    @>      uint256 balancerPoolTokenReceived = joinBalancerPool(balancerPoolId, assets, maxAmountsIn, userData);
+
+            // Step 2: Approve balancerPoolToken for PreDeposit
+            balancerPoolToken.safeIncreaseAllowance(_predeposit, balancerPoolTokenReceived);
+
+            // Step 3: Deposit to PreDeposit
+    @>      PreDeposit(_predeposit).deposit(balancerPoolTokenReceived, msg.sender);
+
+            return balancerPoolTokenReceived;
+        }
+
+As a result of this `balancerPoolTokenReceived` will be 0. This will cause the tokens to be permanently stuck in the router causing complete loss of funds to the user.
+
+### Root Cause
+
+[balancerPoolToken](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/BalancerRouter.sol#L20) is hardcoded
 
 ### Internal preconditions
 
@@ -1964,22 +2323,22 @@ N/A
 
 ### Impact
 
-Leverage users can get leverage exposure for free while forcing other users to pay their fees
+Complete loss of user funds
 
 ### POC
 
-Unfortunately it is impossible to demonstrate via POC because `transferReserveToAuction` is broken
+N/A
 
 ### Mitigation
 
-N/A
+`balancerPoolToken` should be retrieved dynamically from the vault.
 
-# Issue M-7: Market rate never used due to decimal discrepancy 
+# Issue M-9: Market rate never used due to decimal discrepancy 
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/561 
 
 ## Found by 
-0x52, 0xadrii, 0xc0ffEE, Hueber, Ryonen, X0sauce, ZoA, bretzel, future, fuzzysquirrel, shui, stuart\_the\_minion, tinnohofficial
+0x52, 0xadrii, 0xc0ffEE, Hueber, Ryonen, X0sauce, ZoA, bretzel, farman1094, future, fuzzysquirrel, shui, stuart\_the\_minion, tinnohofficial
 
 ### Summary
 
@@ -2062,12 +2421,24 @@ Modify the normalization of `marketRate` in `Pool.sol`'s `simulateRedeem` functi
 
 ```
 
-# Issue M-8: User can always inflate the `totalSellReserveAmount` variable to block the auction from being ended 
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/156
+
+
+
+
+# Issue M-10: User can always inflate the `totalSellReserveAmount` variable to block the auction from being ended 
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/723 
 
+The protocol has acknowledged this issue.
+
 ## Found by 
-0x23r0, 0xDazai, 0xRaz, 0xc0ffEE, 0xmystery, AuditorPraise, Aymen0909, Benterkii, Boy2000, Chain-sentry, ChainProof, DenTonylifer, Hurley, KiroBrejka, Nave765, Ryonen, Saurabh\_Singh, Uddercover, Waydou, ZoA, aswinraj94, copperscrewer, elolpuer, evmboi32, farismaulana, gegul, krishnambstu, moray5554, novaman33, pashap9990, queen, rudhra1749, sl1, solidityenj0yer, t0x1c, zxriptor
+0x23r0, 0xDazai, 0xRaz, 0xc0ffEE, 0xmystery, AuditorPraise, Aymen0909, Benterkii, Boy2000, Chain-sentry, ChainProof, DenTonylifer, Hurley, KiroBrejka, Nave765, Ryonen, Saurabh\_Singh, Waydou, ZoA, aswinraj94, copperscrewer, elolpuer, evmboi32, farismaulana, gegul, krishnambstu, moray5554, novaman33, pashap9990, queen, rudhra1749, sl1, solidityenj0yer, t0x1c, zxriptor
 
 ### Summary
 
@@ -2111,339 +2482,11 @@ None
 
 _No response_
 
-# Issue M-9: `setFee` Fails When Previous Fee is Zero, Leading to unfair Fee collection 
-
-Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/724 
-
-## Found by 
-Aymen0909, POB, feelereth, sl1
-
-### Summary
-
-The `setFee` function is designed to allow governance to update the pool fee. To prevent retroactive application of a higher fee on past deposits, it forces a call to `claimFees` before updating the fee. 
-But if the fee was previously set to zero, the `getFeeAmount` function will always return zero, and `claimFees` will not be called. This causes the `lastFeeClaimTime` variable to remain outdated. 
-As a result, when fees are later claimed, they will incorrectly include the period when the fee was zero, leading to improper fee collection from users' deposits.  
-
-**NOTE:This issue can occur during normal protocol operation and is not relying on governance being trusted or not.**  
-
-### Root Cause
-
-The check in `setFee` to prevent retroactive fee application relies on `getFeeAmount > 0`. However, when the fee is zero, `getFeeAmount` always returns zero, bypassing the `claimFees` call. This leaves `lastFeeClaimTime` outdated, leading to incorrect fee calculations when fees are later claimed.  
-
-### Internal Pre-conditions
-
-1. The fee was previously set to `0`.  
-2. A new fee is set using `setFee`.  
-
-### External Pre-conditions
-
-No external conditions are required for this issue to occur. 
-
-### Attack Path
-
-Let's illustrate a scenario in which this issue will occur:
-
-#### **Initial State:**  
-- Fee: `0%`.  
-- Fee remains `0%` for **1 month**.  
-- `lastFeeClaimTime = 1737000000`.  
-- Reserve token balance: `1,000,000 tokens`.  
-
-#### **Step 1: Update Fee to 5%**
-- Timestamp: `1739592000` (30 days later).
-- Governance calls `setFee(50000)` to set a new fee of `5%`.
-- `getFeeAmount()` returns `0` because the fee is `0%`, so `claimFees` is **skipped**.
-- The fee is updated, but `lastFeeClaimTime` is not updated.
-
-**Result:**
-- Fee = `5%`.
-- `lastFeeClaimTime = 1737000000` (unchanged).  
-
-#### **Step 2: 30 Days Later**
-- Timestamp: `1742192000` (30 days after fee update).
-- `claimFees` is called.
-- `getFeeAmount()` calculates fees as:
-
-```solidity
-feeAmount = (1,000,000 * 0.05 * (1742192000 - 1737000000)) / (10^6 * 31536000);
-```
-
-- Fee amount: **823 tokens**, which incorrectly includes the 30 days when the fee was `0%`.  
-
-### Impact
-
-- Users are overcharged fees for the period when the fee was `0`.  
-- Protocol beneficiaries receive fees that they should not have earned.  
-
-### PoC
-
-The [`setFee`](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Pool.sol#L674-L687) function allow the governance to update the fee value reserved from the protocol, before setting a new fee the function will always try to claim the previous fees accrued and update [`lastFeeClaimTime`](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Pool.sol#L708) which is used in fee calculation to prevent incorrect fee management, where wrong fee value is used for old deposits:  
-
-```solidity
-function setFee(uint256 _fee) external onlyRole(poolFactory.GOV_ROLE()) {
-    // Fee cannot exceed 10%
-    require(_fee <= 100000, FeeTooHigh());
-
-    // Force a fee claim to prevent governance from setting a higher fee
-    // and collecting increased fees on old deposits
-    if (getFeeAmount() > 0) { //@audit Skipped because getFeeAmount() is 0 when fee == 0
-        claimFees();
-    }
-
-    uint256 oldFee = fee;
-    fee = _fee;
-    emit FeeChanged(oldFee, _fee);
-}
-```  
-
-When the function is called and the current fee is zero then `setFee` will return 0 and thus `claimFees` will not be called:
-
-```solidity
-function getFeeAmount() internal view returns (uint256) {
-    return (IERC20(reserveToken).balanceOf(address(this)) * fee * (block.timestamp - lastFeeClaimTime)) / (PRECISION * SECONDS_PER_YEAR);
-}
-```  
-
-Since `claimFees` is not called, `lastFeeClaimTime` is not updated and will keep its old value.
-
-Now that the new fee was set, when `claimFees` is eventually called, it uses the outdated `lastFeeClaimTime`, incorrectly including the period when the fee was `0` in the fee calculation, which means that the edge the protocol was trying to prevent will still occurs where governance is collecting  fees on old deposits (even if it's not by malicious means).
-
-### Mitigation
-
-Update the `setFee` function to ensure `lastFeeClaimTime` is always updated, regardless of the fee amount:  
-
-```solidity
-function setFee(uint256 _fee) external onlyRole(poolFactory.GOV_ROLE()) {
-    require(_fee <= 100000, FeeTooHigh());
-    
-    if (getFeeAmount() > 0) {
-        claimFees();
-    } else {
-        lastFeeClaimTime = block.timestamp; //@audit Ensure lastFeeClaimTime is always updated
-    }
-
-    uint256 oldFee = fee;
-    fee = _fee;
-    emit FeeChanged(oldFee, _fee);
-}
-```  
-
-# Issue M-10: ​​getIndexedUserAmount​ calculates user rewards based on the balance at a specific period, ignoring the duration the user held BondTokens 
-
-Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/741 
-
-## Found by 
-0xNov1ce, 0xe4669da, BADROBINX, Etherking, Kenn.eth, OrangeSantra, devalinas, moray5554
-
-### Summary
-​​getIndexedUserAmount​ calculates user rewards based on the balance at a specific period, ignoring the duration the user held BondTokens. This may lead to users gaining coupons with minimal risk.
-
-```solidity
-function claim() external whenNotPaused nonReentrant {  
-    BondToken bondToken = Pool(pool).bondToken();
-    address couponToken = Pool(pool).couponToken();
-
-    if (address(bondToken) == address(0) || couponToken == address(0)){
-      revert UnsupportedPool();
-    }
-
-    (uint256 currentPeriod,) = bondToken.globalPool();
-    uint256 balance = bondToken.balanceOf(msg.sender);
-    uint256 shares = bondToken.getIndexedUserAmount(msg.sender, balance, currentPeriod)  // @audit Potential step-jump attack
-                              .normalizeAmount(bondToken.decimals(), IERC20(couponToken).safeDecimals());
-    ...
-  }
-```
-
-When users attempt to call `Distributor.claim` to calculate rewards, the function calls `BondToken.getIndexedUserAmount`. Note that there is no time restriction for calling `Distributor.claim`.
-
-```solidity
-  function getIndexedUserAmount(address user, uint256 balance, uint256 period) public view returns(uint256) {
-    IndexedUserAssets memory userPool = userAssets[user];
-    uint256 shares = userPool.indexedAmountShares;
-
-    for (uint256 i = userPool.lastUpdatedPeriod; i < period; i++) {
-      shares += (balance * globalPool.previousPoolAmounts[i].sharesPerToken).toBaseUnit(SHARES_DECIMALS);
-    }
-
-    return shares;
-  }
-```
-
-When calculating rewards using `BondToken.getIndexedUserAmount`, the function only considers the BondToken balance at a specific period. For accumulated rewards, the function iterates from `i = userPool.lastUpdatedPeriod` to `i = currentPeriod - 1`, summing up the rewards for each period. Note that the current period's rewards are not included, as they are only calculated when the period advances.
-
-Regarding the start and end times of an auction, note the following:
-
-```solidity
-contract Auction is Initializable, UUPSUpgradeable, PausableUpgradeable {
-  ...
-  uint256 public endTime;
-
-  ...
-}
-```
-
-In the `Auction` contract, `endTime` is publicly accessible, allowing anyone to know the `endTime` of a specific auction. This means the end time of any period is predictable.
-
-```solidity
-  function startAuction() external whenNotPaused() { 
-    // Check if distribution period has passed
-    require(lastDistribution + distributionPeriod < block.timestamp, DistributionPeriodNotPassed());
-    // Check if auction period hasn't passed
-    require(lastDistribution + distributionPeriod + auctionPeriod >= block.timestamp, AuctionPeriodPassed());
-
-    ...
-
-    // Increase the bond token period
-    bondToken.increaseIndexedAssetPeriod(sharesPerToken);
-    // Update last distribution time
-    lastDistribution = block.timestamp;  // @audit lastDistribution is updated when a new auction starts
-  }
-```
-
-Each call to `Pool.startAuction` increases the bond token period and updates `lastDistribution`. Regarding the constraints:
-
-```solidity
-    require(lastDistribution + distributionPeriod < block.timestamp, DistributionPeriodNotPassed());
-    require(lastDistribution + distributionPeriod + auctionPeriod >= block.timestamp, AuctionPeriodPassed());
-```
-
-Although these are private variables, they can still be directly read through storage slots.
-
-```solidity
-  uint256 private sharesPerToken;
-  uint256 private distributionPeriod; // in seconds
-  uint256 private auctionPeriod; // in seconds
-  uint256 private lastDistribution; // timestamp in seconds
-```
-
-This allows an attacker to calculate the earliest time to call `Pool.startAuction` and execute it immediately, thereby controlling the start time of the next period. Here's the attack flow:
-
-1. **End of Current Auction Period**: The attacker queries the `endTime` of the current auction period (let's say `n`) and deposits a large amount of reserve tokens just before it ends to receive a significant amount of BondTokens. At this point, the auction for period `n` ends, and the attacker holds a large number of BondTokens during period `n`.
-2. **Manipulate Period Transition**: The attacker calculates the exact time to call `Pool.startAuction` and does so immediately, initiating the next period (`n+1`). The attacker then immediately redeems their BondTokens to withdraw their reserve tokens.
-3. **Claim Excessive Rewards**: When calling Distributor.claim, only considering attacker's holdings during period = n, which is calculated as:
-
-    ```solidity
-    (balance * globalPool.previousPoolAmounts[n].sharesPerToken).toBaseUnit(SHARES_DECIMALS)
-    ```
-
-    The calculation ignores how long the BondTokens were actually held within the period. Since the attacker held a large number of BondTokens at the end of period = n, they can claim a disproportionate amount of rewards for that period, regardless of their actual holding duration.
-4. **Exit Without Risk**: After starting the auction for period `n+1`, the attacker redeems their reserve tokens. This strategy allows the attacker to hold BondTokens for a minimal duration while earning substantial rewards, effectively a risk-free trade.
-
-
-
-### Root Cause
-
-Rewards are calculated based on the BondToken balance at a specific moment in the period, and attackers can manipulate the start and end times of periods.
-
-
-### Affected Code
-
-[https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/BondToken.sol#L194-L196](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/BondToken.sol#L194-L196)
-
-
-### Impact
-
-Allows attackers to exploit the reward system for risk-free profits.
-
-
-### Mitigation
-
-Calculate rewards based on the actual duration for which BondTokens were held, rather than the balance at a specific moment in the period. This would prevent short-term exploitation and align rewards with genuine token holdings.
-
-# Issue M-11: Auction settlement affects bond and leverage token creation and redemption in Pool contract 
-
-Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/784 
-
-## Found by 
-phoenixv110
-
-### Summary
-
-The `Pools.sol` contract provides `create()` and `redeem()` method for bond and leverage token creation and redemption respectively. It directly depends upon the amount of reserve tokens in the Pool contract. When an auction starts it resets the `lastDistribution = block.timestamp`. Now, new bond and leverage tokens are getting created as the auction is going for the previous period. But as soon as auction ends `transferReserveToAuction()` sends reserve tokens to `Auction.sol` contract. Which leads to drastic decrease in tvl.
-
-```solidity
-@=> uint256 tvl = (ethPrice * poolReserves).toBaseUnit(oracleDecimals);
-    uint256 collateralLevel = (tvl * PRECISION) / (bondSupply * BOND_TARGET_PRICE);
-    uint256 creationRate = BOND_TARGET_PRICE * PRECISION;
-
-    if (collateralLevel <= COLLATERAL_THRESHOLD) {
-      if (tokenType == TokenType.LEVERAGE && assetSupply == 0) {
-        revert ZeroLeverageSupply();
-      }
-      creationRate = (tvl * multiplier) / assetSupply;
-    } else if (tokenType == TokenType.LEVERAGE) {
-      if (assetSupply == 0) {
-        revert ZeroLeverageSupply();
-      }
-
-      uint256 adjustedValue = tvl - (BOND_TARGET_PRICE * bondSupply);
-      creationRate = (adjustedValue * PRECISION) / assetSupply;
-    }
-```
-
-```solidity
-@=> uint256 tvl = (ethPrice * poolReserves).toBaseUnit(oracleDecimals);
-    uint256 assetSupply = bondSupply;
-    uint256 multiplier = POINT_EIGHT;
-
-    // Calculate the collateral level based on the token type
-    uint256 collateralLevel;
-    if (tokenType == TokenType.BOND) {
-      collateralLevel = ((tvl - (depositAmount * BOND_TARGET_PRICE)) * PRECISION) / ((bondSupply - depositAmount) * BOND_TARGET_PRICE);
-    } else {
-      multiplier = POINT_TWO;
-      assetSupply = levSupply;
-      collateralLevel = (tvl * PRECISION) / (bondSupply * BOND_TARGET_PRICE);
-
-      if (assetSupply == 0) {
-        revert ZeroLeverageSupply();
-      }
-    }
-```
-
-### Root Cause
-
-- https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Pool.sol#L325
-- https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Pool.sol#L491
-
-### Internal Pre-conditions
-
-_No response_
-
-### External Pre-conditions
-
-_No response_
-
-### Attack Path
-
-_No response_
-
-### Impact
-
-- In `create()` flow the creation rate will decrease which will inflate the minting of bond and leverage tokens drastically.
-https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Pool.sol#L343
-```solidity
-return ((depositAmount * ethPrice * PRECISION) / creationRate).toBaseUnit(oracleDecimals);
-```
-
-- In `redeem()` form the redemption rate will decrease which will decrease the redemption tokens.
-https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Pool.sol#L524
-```solidity
-return ((depositAmount * redeemRate).fromBaseUnit(oracleDecimals) / ethPrice) / PRECISION;
-```
-
-### PoC
-
-_No response_
-
-### Mitigation
-
-Currently the pool reserves are calculated as current balance of reserve tokens in Pool.sol contract. If it is expected then atleast block minting and redemption until previous Auction is complete
-
-# Issue M-12: Protocol mechanics incorrectly assume 1 USDC will always be worth 1 USD 
+# Issue M-11: Protocol mechanics incorrectly assume 1 USDC will always be worth 1 USD 
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/797 
+
+The protocol has acknowledged this issue.
 
 ## Found by 
 0xadrii, PNS
@@ -2604,7 +2647,7 @@ Consider adding an oracle to convert the `bondExpectedValuation` to USD.
 
 Another way to mitigate this issue is by computing the `TVL` in USDC, instead of USD. This would need changes in `getOraclePrice` function in the `OracleReader`, as an additional step should be included to convert from USD to USDC.
 
-# Issue M-13: Approval overflow causes DoS in `BalancerRouter`'s `exitPlazaAndBalancer` 
+# Issue M-12: Approval overflow causes DoS in `BalancerRouter`'s `exitPlazaAndBalancer` 
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/835 
 
@@ -2764,6 +2807,93 @@ function _exitBalancerPool(
 -        balancerPoolToken.safeIncreaseAllowance(address(balancerVault), balancerPoolTokenIn); 
         balancerVault.exitPool(poolId, address(this), payable(to), request);
     }
+```
+
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/146
+
+
+
+
+# Issue M-13: Potential reedem rate rounding to zero 
+
+Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/864 
+
+## Found by 
+056Security, 0x23r0, 0x52, 0xAadi, 0xadrii, Abhan1041, Harry\_cryptodev, KiroBrejka, Matin, Negin, OrangeSantra, Ryonen, X0sauce, Z3R0, ZoA, almurhasan, bretzel, carlitox477, denys\_sosnovskyi, future, fuzzysquirrel, globalace, robertauditor, solidityenj0yer, stuart\_the\_minion, super\_jack
+
+### Summary
+
+Due to bad order of operations, redeem rate can be be rounded down to zero causing transactions reverting in otherwise normal conditions, especially in causes of low TVL value or high bond supply.
+
+### Root Cause
+
+[Pool::getRedeemAmount()](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/14a962c52a8f4731bbe4655a2f6d0d85e144c7c2/plaza-evm/src/Pool.sol#L514) is used to calculate the redeem rate in leverage token types:
+
+```solidity
+  function getRedeemAmount(
+    ...
+  ) public pure returns(uint256) {
+    ...
+    } else if (tokenType == TokenType.LEVERAGE) {
+      redeemRate = ((tvl - (bondSupply * BOND_TARGET_PRICE)) / assetSupply) * PRECISION;
+    ...
+  }
+```
+
+In cases of low TVL or scenarios where `bondSupply` makes up a large part of the TVL, the `redeemRate` in this case will be rounded to zero as the `assetSupply` will undoubtedly be much larger. This leads to a loss of precision which wrongly calculates the redeem amount as zero, thus leading to the transaction reverting in the `_redeem()` function:
+
+```solidity
+  function _redeem(
+   ...
+   ) private returns(uint256) {
+    // Get amount to mint
+    uint256 reserveAmount = simulateRedeem(tokenType, depositAmount);
+
+    // Check whether reserve contains enough funds
+    if (reserveAmount < minAmount) {
+      revert MinAmount();
+    }
+
+    // Reserve amount should be higher than zero
+    if (reserveAmount == 0) {
+      revert ZeroAmount();
+    }
+
+   ...
+  }
+```
+
+### Internal Pre-conditions
+
+_No response_
+
+### External Pre-conditions
+
+_No response_
+
+### Attack Path
+
+_No response_
+
+### Impact
+
+Inability for users to redeem in low TVL or mostly bonded markets
+
+### PoC
+
+_No response_
+
+### Mitigation
+
+Change the order:
+
+```solidity
+      redeemRate = ((tvl - (bondSupply * BOND_TARGET_PRICE)) * PRECISION) / assetSupply;
 ```
 
 # Issue M-14: Attacker can drain most of the reserves by weaponizing USDC blacklisting 
@@ -3106,7 +3236,197 @@ As seen in the output attacker acquired 849.15 WETH by spending only ~7500 USDC 
 
 Use pull instead of push approach for USDC refunds (in the case of automatically removing the lowest bid)
 
-# Issue M-15: BondOracleAdapter can fetch price from inefficient Pool on Aerodrome 
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/138
+
+
+
+
+# Issue M-15: Auctions succeeding condition does not take into account the claimable fees in the pool. It can result of a drastical reduction of claimable fees if auction succeeds, or cause an auction to fail if the fees are claimed 
+
+Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/891 
+
+## Found by 
+0xadrii, BADROBINX, Boy2000, Strapontin, bladeee, copperscrewer, i3arba, komane007, phoenixv110, shiazinho, t0x1c, y4y
+
+### Summary
+
+One of the condition for an auction to succeed is to have the [total bet of `reserveToken` be less than or equal to 90%](https://github.com/sherlock-audit/2024-12-plaza-finance/blob/main/plaza-evm/src/Auction.sol#L341) (or higher, set by admin) of the pool's balance to ensure tokens are transfered.
+
+This calculation does not take into account the amount of fees claimable by the beneficiary, and can result in two issues :
+
+- When an auction succeeds, it gets from the pool the amount of tokens users bet. This will drastically reduce the fees claimable from the beneficiary as it lowers the pool's balance, which is linked to fees calculation.
+
+- If an auction should succeed by having the total of reserveToken bid being on the lower edge of the 90% of pool's token amount, and the fees are claimed, then the auction may fail if the reserveToken bid become higher than the newly calculated 90% to tokens in the pool.
+
+### Root Cause
+
+Auction does not includes the claimable fees when calculating the reserve amount it can receive
+
+### Internal Pre-conditions
+
+_No response_
+
+### External Pre-conditions
+
+_No response_
+
+### Attack Path
+
+### Attack path 1
+
+1. An auction is created and the condition for it to succeed are met (with an average total amount of `reserveToken` bid)
+2. The amount of fees claimable are equal to X
+3. The function `Auction::endAuction` is called and the auction succeeds, taking `reserveToken` from the pool
+4. The amount of fees claimable are now lower than X
+
+### Attack path 2
+
+1. An auction is created and the condition for it to succeed are met (with a high total amount of `reserveToken` bid, near 90%)
+2. The fees are claimed
+3. The function `Auction::endAuction` is called and the auction ends in the state `FAILED_POOL_SALE_LIMIT` because the bids are higher than allowed amount of `reserveToken`
+
+### Impact
+
+Drastic reduction of fees claimable and potential auction ending in an unsuccessful state
+
+### PoC
+
+> To get the amount of fees claimable from the pool, set the visibility of the function `Pool::getFeeAmount` to public
+
+Copy this poc in Auction.t.sol and run it
+
+```solidity
+    // forge test --mt test_auction_fees_1 -vvv
+    function test_auction_fees_1() public {
+        // We need to set the poolSaleLimit to 90% because it is set to 110% in the setUp
+        uint256 poolSaleLimitSlot = 6;
+        vm.store(address(auction), bytes32(poolSaleLimitSlot), bytes32(uint256(90)));
+        console.log(auction.poolSaleLimit());
+
+        // Set the fees at 10%
+        vm.prank(governance);
+        Pool(pool).setFee(100000);
+
+        uint256 maxUSDCToBid = auction.totalBuyCouponAmount();
+        // If we go beyond this value, endAuction will end in a failed state (FAILED_POOL_SALE_LIMIT)
+        uint256 maxReserveTokenClaimable =
+            (IERC20(auction.sellReserveToken()).balanceOf(pool) * auction.poolSaleLimit()) / 100;
+
+        // 1. The auction can succeed, and will rewards users for half of the pool's claimable amount
+        vm.startPrank(bidder);
+
+        usdc.mint(bidder, maxUSDCToBid);
+        usdc.approve(address(auction), maxUSDCToBid);
+
+        auction.bid(maxReserveTokenClaimable / 2, maxUSDCToBid);
+
+        vm.stopPrank();
+
+        vm.warp(auction.endTime());
+
+        // 2. Amount of fees claimable are equal to X
+        // Set `getFeeAmount` to public to see its result value
+        uint256 claimableFeesBefore = Pool(pool).getFeeAmount();
+        console.log("claimableFeesBefore", claimableFeesBefore);
+
+        // 3. `endAuction` put the auction in the succeed state
+        auction.endAuction();
+        assert(Auction.State.SUCCEEDED == auction.state());
+
+        // 4. The amount of fees claimable are now lower than X
+        uint256 claimableFeesAfter = Pool(pool).getFeeAmount();
+        console.log("claimableFeesAfter ", claimableFeesAfter);
+
+        assert(claimableFeesBefore > claimableFeesAfter);
+    }
+
+    // forge test --mt test_auction_fees_2 -vvv
+    function test_auction_fees_2() public {
+        // We need to set the poolSaleLimit to 90% because it is set to 110% in the setUp
+        uint256 poolSaleLimitSlot = 6;
+        vm.store(address(auction), bytes32(poolSaleLimitSlot), bytes32(uint256(90)));
+        console.log(auction.poolSaleLimit());
+
+        // Set the fees at 10%
+        vm.startPrank(governance);
+        Pool(pool).setFee(100000);
+        Pool(pool).setFeeBeneficiary(governance);
+        vm.stopPrank();
+
+        uint256 maxUSDCToBid = auction.totalBuyCouponAmount();
+        // If we go beyond this value, endAuction will end in a failed state (FAILED_POOL_SALE_LIMIT)
+        uint256 maxReserveTokenClaimable = (IERC20(auction.sellReserveToken()).balanceOf(pool) * auction.poolSaleLimit()) / 100;
+
+        // 1. The auction can succeed, and will rewards users for almost the pool's claimable amount
+        vm.startPrank(bidder);
+
+        usdc.mint(bidder, maxUSDCToBid);
+        usdc.approve(address(auction), maxUSDCToBid);
+
+        auction.bid(maxReserveTokenClaimable - 10, maxUSDCToBid);
+
+        vm.stopPrank();
+
+        vm.warp(auction.endTime());
+
+        // 2. The fees are claimed
+        vm.prank(governance);
+        Pool(pool).claimFees();
+
+        // 3. Ending the auction fails it
+        auction.endAuction();
+        assert(Auction.State.FAILED_POOL_SALE_LIMIT == auction.state());
+
+        // Note that without the governance claiming fees, the auction would succeed
+    }
+```
+
+Running them produces the following output :
+
+```console
+$ forge test --mt test_auction_fees_1 -vvv
+[⠰] Compiling...
+[⠒] Compiling 14 files with Solc 0.8.27
+[⠰] Solc 0.8.27 finished in 24.60s
+Compiler run successful!
+
+Ran 1 test for test/Auction.t.sol:AuctionTest
+[PASS] test_auction_fees_1() (gas: 448008)
+Logs:
+  90
+  claimableFeesBefore 1369863013698630136986301369
+  claimableFeesAfter  753424657534246575342465753
+
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 19.26ms (2.42ms CPU time)
+
+Ran 1 test suite in 42.30ms (19.26ms CPU time): 1 tests passed, 0 failed, 0 skipped (1 total tests)
+
+...
+
+$ forge test --mt test_auction_fees_2 -vvv
+[⠰] Compiling...
+No files changed, compilation skipped
+
+Ran 1 test for test/Auction.t.sol:AuctionTest
+[PASS] test_auction_fees_2() (gas: 467880)
+Logs:
+  90
+
+Suite result: ok. 1 passed; 0 failed; 0 skipped; finished in 19.09ms (2.16ms CPU time)
+
+Ran 1 test suite in 39.14ms (19.09ms CPU time): 1 tests passed, 0 failed, 0 skipped (1 total tests)
+```
+
+### Mitigation
+
+Include the claimable fees when calculating the total sell token limit at the end of an auction, or allocate an amount of tokens for an auction when the auction is created.
+
+# Issue M-16: BondOracleAdapter can fetch price from inefficient Pool on Aerodrome 
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/931 
 
@@ -3161,7 +3481,17 @@ N/A
 
 Modify the `getPool` function to prioritize pools based on expected trading behavior and fee structure for the Bond/USD pair. Consider factors like typical trading volume and volatility when selecting a suitable tick spacing.  For example, start with more reasonable tick spacing.
 
-# Issue M-16: The state variable `BondToken.globalPool` is updated incorrectly via `Pool.startAuction()` 
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/168
+
+
+
+
+# Issue M-17: The state variable `BondToken.globalPool` is updated incorrectly via `Pool.startAuction()` 
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/972 
 
@@ -3288,9 +3618,21 @@ Update the `increaseIndexedAssetPeriod()` function to use the current value of `
 ```
 
 
-# Issue M-17: Missing Chainlink Price Feeds for wstETH/USD and stETH/USD in BalancerOracleAdapter.sol 
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/161
+
+
+
+
+# Issue M-18: Missing Chainlink Price Feeds for wstETH/USD and stETH/USD in BalancerOracleAdapter.sol 
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/981 
+
+The protocol has acknowledged this issue.
 
 ## Found by 
 056Security, 0rpse, 0xAadi, 0xShahilHussain, 0xadrii, Adotsam, Aymen0909, KiroBrejka, noromeb, pashap9990, sl1, solidityenj0yer, whitehat777, x0lohaclohell
@@ -3347,12 +3689,12 @@ _No response_
 
 _No response_
 
-# Issue M-18: Low TVL and high Leverage Supply will DoS the redeem of Leverage tokens 
+# Issue M-19: Low TVL and high Leverage Supply will DoS the redeem of Leverage tokens 
 
 Source: https://github.com/sherlock-audit/2024-12-plaza-finance-judging/issues/1039 
 
 ## Found by 
-056Security, 0x23r0, 0x52, 0xAadi, 0xadrii, 0xe4669da, Abhan1041, CL001, Goran, Harry\_cryptodev, KiroBrejka, KupiaSec, Matin, Negin, OrangeSantra, Ryonen, Z3R0, ZoA, almurhasan, bretzel, carlitox477, denys\_sosnovskyi, dobrevaleri, elvin.a.block, future, fuzzysquirrel, globalace, robertauditor, solidityenj0yer, stuart\_the\_minion, super\_jack, zxriptor
+0xc0ffEE, 0xe4669da, CL001, Goran, KupiaSec, dobrevaleri, elvin.a.block, future, zxriptor
 
 ### Summary
 
@@ -3535,4 +3877,14 @@ if (collateralLevel <= COLLATERAL_THRESHOLD) {
       redeemRate = marketRate;
     }
 ```
+
+## Discussion
+
+**sherlock-admin2**
+
+The protocol team fixed this issue in the following PRs/commits:
+https://github.com/Convexity-Research/plaza-evm/pull/159
+
+
+
 
